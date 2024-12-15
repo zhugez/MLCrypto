@@ -1,0 +1,5 @@
+{
+    "0": "gaslimit",
+    "1": "integeroverflow",
+    "2": "reentrancy"
+}
