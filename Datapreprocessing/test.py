@@ -1,206 +1,229 @@
-from sklearn.svm import SVC
-from sklearn.pipeline import make_pipeline
-from sklearn.model_selection import GridSearchCV, learning_curve
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-import plotly.figure_factory as ff
-import warnings
-import pandas as pd
+import json
 import os
+from tqdm import tqdm
+from sklearn.metrics import classification_report
 
-# Suppress all warnings
-warnings.filterwarnings('ignore')
-
-# First, vectorize the features
-vec = DictVectorizer(sparse=True)
-X_train_vec = vec.fit_transform(X_train)
-X_test_vec = vec.transform(X_test)
-
-# Create pipeline with scaling and SVM
-scaler = StandardScaler(with_mean=False)
-svc_pipeline = make_pipeline(
-    scaler,
-    SVC(random_state=42, probability=True)
-)
-
-# Define parameter grid for tuning
-param_grid = {
-    'svc__C': [0.1, 1, 10, 100],
-    'svc__kernel': ['rbf', 'linear'],
-    'svc__gamma': ['scale', 'auto', 0.1, 0.01, 0.001],
-    'svc__class_weight': ['balanced', None]
-}
-
-# Create and fit GridSearchCV
-grid_search = GridSearchCV(
-    estimator=svc_pipeline,
-    param_grid=param_grid,
-    cv=5,
-    n_jobs=-1,
-    scoring='f1_macro',
-    verbose=2,
-    return_train_score=True,
-    error_score='raise'
-)
-
-# Fit the model
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    grid_search.fit(X_train_vec, y_train)
-
-# 1. Compare Training and Validation Scores
-results = pd.DataFrame(grid_search.cv_results_)
-results = results.sort_values('rank_test_score')
-
-print("\nBest parameters:", grid_search.best_params_)
-print("Best cross-validation score:", grid_search.best_score_)
-print("\nBest model scores:")
-print(f"Training score: {grid_search.score(X_train_vec, y_train):.4f}")
-print(f"Test score: {grid_search.score(X_test_vec, y_test):.4f}")
-charts_dir = "charts"
-os.makedirs(charts_dir, exist_ok=True)
-# 2. Plot Learning Curves using Plotly
-def plot_learning_curves(estimator, X, y):
-    train_sizes, train_scores, val_scores = learning_curve(
-        estimator, X, y,
-        train_sizes=np.linspace(0.1, 1.0, 10),
-        cv=5,
-        n_jobs=-1,
-        scoring='f1_macro'
-    )
+class OpcodesDataset(Dataset):
+    def __init__(self, features, labels, max_length=500):
+        self.features = features
+        self.labels = labels
+        self.max_length = max_length
+        
+        # Create vocabulary from the features
+        self.vocab = self._create_vocabulary()
+        
+    def _create_vocabulary(self):
+        # Create a set of all unique tokens from numeric features
+        vocab = set()
+        for feature_dict in self.features:
+            # Extract all numeric values as tokens
+            tokens = [str(v) for v in feature_dict.values() if isinstance(v, (int, float))]
+            vocab.update(tokens)
+        return {token: idx + 1 for idx, token in enumerate(sorted(vocab))}
     
-    train_mean = np.mean(train_scores, axis=1)
-    train_std = np.std(train_scores, axis=1)
-    val_mean = np.mean(val_scores, axis=1)
-    val_std = np.std(val_scores, axis=1)
+    def __getitem__(self, idx):
+        feature_dict = self.features[idx]
+        label = self.labels[idx]
+        
+        # Convert numeric features to a sequence
+        numeric_features = [v for v in feature_dict.values() if isinstance(v, (int, float))]
+        feature_tokens = [str(v) for v in numeric_features]
+        
+        # Convert tokens to indices and pad/truncate
+        indices = [self.vocab.get(token, 0) for token in feature_tokens[:self.max_length]]
+        indices = indices + [0] * (self.max_length - len(indices))
+        
+        return {
+            'input_ids': torch.tensor(indices, dtype=torch.long),
+            'label': torch.tensor(label, dtype=torch.long)
+        }
     
-    fig = go.Figure()
+    def __len__(self):
+        return len(self.features)
+
+# 2. Update the BiLSTM model for our feature dimensions
+class BiLSTMClassifier(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, num_classes, num_layers=2, dropout=0.2):
+        super().__init__()
+        
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+        self.lstm = nn.LSTM(
+            embedding_dim,
+            hidden_dim,
+            num_layers=num_layers,
+            bidirectional=True,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_dim * 2, num_classes)
+        
+    def forward(self, x):
+        embedded = self.embedding(x)
+        lstm_out, _ = self.lstm(embedded)
+        
+        # Global max pooling
+        pooled = torch.max(lstm_out, dim=1)[0]
+        dropped = self.dropout(pooled)
+        output = self.fc(dropped)
+        return output
+
+# 3. Update the training function
+def train_bilstm_model(X_train, X_val, X_test, y_train, y_val, y_test, output_dir="bilstm_artifacts"):
+    # Create output directory
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     
-    # Add training score
-    fig.add_trace(go.Scatter(
-        x=train_sizes,
-        y=train_mean,
-        name='Training Score',
-        line=dict(color='blue'),
-        mode='lines'
-    ))
+    # Convert lists to proper format if needed
+    X_train = [dict(x) for x in X_train]
+    X_val = [dict(x) for x in X_val]
+    X_test = [dict(x) for x in X_test]
     
-    # Add training score error bands
-    fig.add_trace(go.Scatter(
-        x=np.concatenate([train_sizes, train_sizes[::-1]]),
-        y=np.concatenate([train_mean + train_std, (train_mean - train_std)[::-1]]),
-        fill='toself',
-        fillcolor='rgba(0,0,255,0.1)',
-        line=dict(color='rgba(255,255,255,0)'),
-        name='Training Score Std'
-    ))
+    # Create datasets
+    train_dataset = OpcodesDataset(X_train, y_train)
+    val_dataset = OpcodesDataset(X_val, y_val)
+    test_dataset = OpcodesDataset(X_test, y_test)
     
-    # Add validation score
-    fig.add_trace(go.Scatter(
-        x=train_sizes,
-        y=val_mean,
-        name='Cross-validation Score',
-        line=dict(color='red'),
-        mode='lines'
-    ))
+    # Create dataloaders
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32)
+    test_loader = DataLoader(test_dataset, batch_size=32)
     
-    # Add validation score error bands
-    fig.add_trace(go.Scatter(
-        x=np.concatenate([train_sizes, train_sizes[::-1]]),
-        y=np.concatenate([val_mean + val_std, (val_mean - val_std)[::-1]]),
-        fill='toself',
-        fillcolor='rgba(255,0,0,0.1)',
-        line=dict(color='rgba(255,255,255,0)'),
-        name='Cross-validation Score Std'
-    ))
+    # Initialize model
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = BiLSTMClassifier(
+        vocab_size=len(train_dataset.vocab) + 1,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_classes=3
+    ).to(device)
     
-    fig.update_layout(
-        title='Learning Curves',
-        xaxis_title='Training Examples',
-        yaxis_title='F1 Score',
-        showlegend=True,
-        template='plotly_white'
-    )
+    # Define loss function and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
-    # Save the figure
-    fig.write_html(os.path.join(charts_dir, "learning_curves.html"))
-    fig.show()
+    # Training loop
+    num_epochs = 10
+    best_val_loss = float('inf')
+    
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        train_loss = 0
+        train_correct = 0
+        train_total = 0
+        
+        for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}'):
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['label'].to(device)
+            
+            # Forward pass
+            outputs = model(input_ids)
+            loss = criterion(outputs, labels)
+            
+            # Backward pass and optimize
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            # Calculate accuracy
+            _, predicted = torch.max(outputs.data, 1)
+            train_total += labels.size(0)
+            train_correct += (predicted == labels).sum().item()
+            train_loss += loss.item()
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                input_ids = batch['input_ids'].to(device)
+                labels = batch['label'].to(device)
+                
+                outputs = model(input_ids)
+                loss = criterion(outputs, labels)
+                
+                _, predicted = torch.max(outputs.data, 1)
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
+                val_loss += loss.item()
+        
+        # Calculate epoch metrics
+        train_loss = train_loss / len(train_loader)
+        train_acc = 100 * train_correct / train_total
+        val_loss = val_loss / len(val_loader)
+        val_acc = 100 * val_correct / val_total
+        
+        print(f'\nEpoch {epoch+1}/{num_epochs}:')
+        print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
+        print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%')
+        
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+            }, os.path.join(output_dir, 'best_model.pt'))
+    
+    # Test phase
+    model.eval()
+    test_correct = 0
+    test_total = 0
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['label'].to(device)
+            
+            outputs = model(input_ids)
+            _, predicted = torch.max(outputs.data, 1)
+            
+            test_total += labels.size(0)
+            test_correct += (predicted == labels).sum().item()
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    test_acc = 100 * test_correct / test_total
+    print(f'\nTest Accuracy: {test_acc:.2f}%')
+    
+    # Save classification report
+    report = classification_report(all_labels, all_preds, output_dict=True)
+    with open(os.path.join(output_dir, 'classification_report.json'), 'w') as f:
+        json.dump(report, f, indent=4)
+    
+    # Save vocabulary
+    with open(os.path.join(output_dir, 'vocab.json'), 'w') as f:
+        json.dump(train_dataset.vocab, f, indent=4)
+    
+    return model, train_dataset.vocab
 
-# Plot learning curves for the best model
-best_model = grid_search.best_estimator_
-plot_learning_curves(best_model, X_train_vec, y_train)
-
-# 3. Print detailed classification report
-y_pred = grid_search.predict(X_test_vec)
-print("\nClassification Report:")
-print(classification_report(y_test, y_pred))
-
-# 4. Plot confusion matrix using Plotly
-cm = confusion_matrix(y_test, y_pred)
-labels = sorted(y_test.unique())
-
-fig = go.Figure(data=go.Heatmap(
-    z=cm,
-    x=labels,
-    y=labels,
-    text=cm,
-    texttemplate="%{text}",
-    textfont={"size": 16},
-    hoverongaps=False,
-    colorscale='Blues'
-))
-
-fig.update_layout(
-    title='Confusion Matrix',
-    xaxis_title='Predicted Label',
-    yaxis_title='True Label',
-    xaxis=dict(tickmode='array', ticktext=labels, tickvals=labels),
-    yaxis=dict(tickmode='array', ticktext=labels, tickvals=labels),
-    width=600,
-    height=600,
-)
-
-# Save the confusion matrix
-fig.write_html(os.path.join(charts_dir, "confusion_matrix.html"))
-fig.show()
-
-# 5. Plot Parameter Comparison (new visualization)
-param_comparison = results[['params', 'mean_test_score']].head(10)
-param_comparison['param_string'] = param_comparison['params'].apply(
-    lambda x: f"C={x['svc__C']}, kernel={x['svc__kernel']}, gamma={x['svc__gamma']}"
-)
-
-fig = px.bar(
-    param_comparison,
-    x='param_string',
-    y='mean_test_score',
-    title='Top 10 Parameter Combinations',
-    labels={
-        'param_string': 'Parameters',
-        'mean_test_score': 'Mean Test Score'
-    }
-)
-
-fig.update_layout(
-    xaxis_tickangle=-45,
-    showlegend=False,
-    template='plotly_white'
-)
-
-# Save the parameter comparison
-fig.write_html(os.path.join(charts_dir, "parameter_comparison.html"))
-fig.show()
-
-# Save the model
-joblib.dump(grid_search, 'svm_model.joblib')
-
-# To save as static images, first install:
-# pip install -U kaleido
-
-# Then use:
-fig.write_image(os.path.join(charts_dir, "learning_curves.png"))
-fig.write_image(os.path.join(charts_dir, "confusion_matrix.png"))
-fig.write_image(os.path.join(charts_dir, "parameter_comparison.png"))
+# Run the training
+try:
+    print("\nStarting BiLSTM model training...")
+    print(f"Using device: {torch.device('cuda' if torch.cuda.is_available() else 'cpu')}")
+    
+    # Convert features to list of dicts if needed
+    X_train = [dict(x) for x in X_train]
+    X_val = [dict(x) for x in X_val]
+    X_test = [dict(x) for x in X_test]
+    
+    model, vocab = train_bilstm_model(X_train, X_val, X_test, y_train, y_val, y_test)
+    
+    print("\nTraining completed successfully!")
+    
+except Exception as e:
+    print(f"An error occurred during training: {str(e)}")
+    raise  # This will show the full traceback
