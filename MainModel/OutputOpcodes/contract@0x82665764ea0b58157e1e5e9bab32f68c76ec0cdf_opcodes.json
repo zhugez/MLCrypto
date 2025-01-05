@@ -1,0 +1,25 @@
+{
+  "source_file": "./output/contract@0x82665764ea0b58157e1e5e9bab32f68c76ec0cdf.bin",
+  "opcodes": [
+    "PUSH1",
+    "PUSH1",
+    "MSTORE",
+    "CALLVALUE",
+    "PUSH1",
+    "JUMPI",
+    "JUMPDEST",
+    "PUSH1",
+    "DUP1",
+    "PUSH1",
+    "PUSH1",
+    "CODECOPY",
+    "PUSH1",
+    "RETURN",
+    "PUSH1",
+    "PUSH1",
+    "MSTORE",
+    "JUMPDEST",
+    "PUSH1",
+    "JUMP"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+    "format_version": "1.0",
+    "input_format": {
+        "opcodes": "List of opcodes as space-separated string",
+        "example": "PUSH PUSH MSTORE CALLVALUE ISZERO PUSH JUMPI..."
+    }
+}
