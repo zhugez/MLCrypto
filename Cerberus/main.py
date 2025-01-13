@@ -96,7 +96,7 @@ class CerberusAnalyzer:
             if features is None:
                 return None
                 
-            st.write(f"Features shape: {features.shape}")
+            # st.write(f"Features shape: {features.shape}")
             X = features.reshape(1, -1)
             
             st.write("Making prediction...")
@@ -108,24 +108,27 @@ class CerberusAnalyzer:
             prediction = self.model.predict(X)[0]
             probabilities = self.model.predict_proba(X)[0]
 
-            st.write(f"Raw prediction: {prediction}")
-            st.write(f"Probabilities: {probabilities}")
+            # st.write(f"Raw prediction: {prediction}")
+            # st.write(f"Probabilities: {probabilities}")
 
             # Map string labels to indices
             label_to_index = {
-                "gaslimit": 0,
-                "integeroverflow": 1,
-                "reentrancy": 2
+                "clean contract": 0,
+                "gaslimit": 1,
+                "integeroverflow": 2,
+                "reentrancy": 3
             }
 
             # Map prediction to vulnerability info
             vulnerability_types = {
-                0: "Gas Limit Issues",
-                1: "Integer Overflow",
-                2: "Reentrancy"
-            }
+                0: "Clean Contract",    # No vulnerabilities detected
+                1: "Gas Limit Issues",
+                2: "Integer Overflow",
+                3: "Reentrancy"
+                 }
 
             severity_levels = {
+                "Clean Contract": "None",  # Added clean case
                 "Gas Limit Issues": "Medium",
                 "Integer Overflow": "High",
                 "Reentrancy": "Critical"
@@ -135,16 +138,30 @@ class CerberusAnalyzer:
             pred_index = label_to_index.get(str(prediction).lower(), 0)
             vuln_type = vulnerability_types[pred_index]
             
-            return {
-                "prediction": pred_index,
-                "vulnerability_type": vuln_type,
-                "severity": severity_levels[vuln_type],
-                "confidence": float(np.max(probabilities)),
-                "probabilities": {
-                    vulnerability_types[i]: float(prob)
-                    for i, prob in enumerate(probabilities)
+            if vuln_type == "Clean Contract":
+                return {
+                    "prediction": pred_index,
+                    "vulnerability_type": "Clean Contract",
+                    "severity": "None",
+                    "confidence": float(np.max(probabilities)),
+                    "probabilities": {
+                        vulnerability_types[i]: float(prob)
+                        for i, prob in enumerate(probabilities)
+                    },
+                    "is_clean": True  # Flag for clean contracts
                 }
-            }
+            else:
+                return {
+                    "prediction": pred_index,
+                    "vulnerability_type": vuln_type,
+                    "severity": severity_levels[vuln_type],
+                    "confidence": float(np.max(probabilities)),
+                    "probabilities": {
+                        vulnerability_types[i]: float(prob)
+                        for i, prob in enumerate(probabilities)
+                    },
+                    "is_clean": False
+                }
 
         except Exception as e:
             st.error(f"Prediction error: {str(e)}")
@@ -368,17 +385,25 @@ def main():
                             result = analyzer.predict_vulnerabilities(bytecode)
                             
                             if result:
-                                severity_class = f"vulnerability-{result['severity'].lower()}"
-                                st.markdown(f"""
-                                    #### Detected Vulnerability
-                                    - Type: <span class='{severity_class}'>{result['vulnerability_type']}</span>
-                                    - Severity: <span class='{severity_class}'>{result['severity']}</span>
-                                    - Confidence: {result['confidence']:.2%}
-                                """, unsafe_allow_html=True)
+                                if result.get("is_clean", False):
+                                    st.success("✅ No vulnerabilities detected")
+                                    st.markdown(f"""
+                                        #### Analysis Results
+                                        - Status: Clean Contract
+                                        - Confidence: {result['confidence']:.2%}
+                                    """)
+                                else:
+                                    severity_class = f"vulnerability-{result['severity'].lower()}"
+                                    st.markdown(f"""
+                                        #### Detected Vulnerability
+                                        - Type: <span class='{severity_class}'>{result['vulnerability_type']}</span>
+                                        - Severity: <span class='{severity_class}'>{result['severity']}</span>
+                                        - Confidence: {result['confidence']:.2%}
+                                    """, unsafe_allow_html=True)
 
-                                st.markdown("#### Vulnerability Probabilities")
-                                for vuln_type, prob in result['probabilities'].items():
-                                    st.write(f"- {vuln_type}: {prob:.2%}")
+                                    st.markdown("#### Vulnerability Probabilities")
+                                    for vuln_type, prob in result['probabilities'].items():
+                                        st.write(f"- {vuln_type}: {prob:.2%}")
                             else:
                                 st.error("No results generated from analysis")
             
